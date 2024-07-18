@@ -1,151 +1,141 @@
 <?php
-/**
- * Function to handle form submission and send magic login link
- */
-function magic_login_form()
-{
-    if (isset($_POST['user_email'])) {
-        $email = sanitize_email($_POST['user_email']);
-        $user = get_user_by('email', $email);
+// Add this to your theme's functions.php or in a custom plugin file
 
-        if ($user) {
-            $token = wp_generate_password(16, false, false);
+// Function to handle form submission and send magic login link
+function magic_login_form() {
+    check_ajax_referer('magic-login-nonce', 'security');
 
-            // Save the token and time in user meta for later verification
-            update_user_meta($user->ID, 'magic_login_token', $token);
-            update_user_meta($user->ID, 'magic_login_token_time', time());
+    if (!isset($_POST['member_mail'])) {
+        wp_send_json_error('Email not provided.');
+    }
 
-            // Send the magic login link via email
-            send_magic_login_link($email, $token);
-            wp_send_json_success();
-        } else {
-            // Send error response if user not found
-            wp_send_json_error('<p>User not found.</p>');
-        }
+    $email = sanitize_email($_POST['member_mail']);
+    $user = get_user_by('email', $email);
+
+    if (!$user) {
+        wp_send_json_error('User not found.');
+    }
+
+    if (!in_array('member', (array) $user->roles)) {
+        wp_send_json_error('User does not have the member role.');
+    }
+
+    $token = wp_generate_password(32, false);
+    $expiration = time() + (15 * MINUTE_IN_SECONDS);
+
+    update_user_meta($user->ID, 'magic_login_token', $token);
+    update_user_meta($user->ID, 'magic_login_token_expiration', $expiration);
+
+    $sent = send_magic_login_link($email, $token);
+
+    if ($sent) {
+        wp_send_json_success('Magic login link sent successfully.');
+    } else {
+        wp_send_json_error('Failed to send magic login link.');
     }
 }
-add_action('wp_ajax_magic_login_form', 'magic_login_form');
 add_action('wp_ajax_nopriv_magic_login_form', 'magic_login_form');
+add_action('wp_ajax_magic_login_form', 'magic_login_form');
 
-/**
- * Function to get magic login token time
- */
-function get_magic_login_token_time($email)
-{
+// Function to send magic login link via email
+function send_magic_login_link($email, $token) {
     $user = get_user_by('email', $email);
-    if ($user) {
-        return get_user_meta($user->ID, 'magic_login_token_time', true);
-    }
-    return false;
+    $login_link = add_query_arg(
+        array('action' => 'magic_login', 'email' => $email, 'token' => $token),
+        home_url()
+    );
+
+    $subject = 'Your Magic Login Link for ' . get_bloginfo('name');
+    $message = "Hello {$user->display_name},\n\n";
+    $message .= "Click the following link to log in:\n\n";
+    $message .= $login_link . "\n\n";
+    $message .= "This link will expire in 15 minutes and can only be used once.\n\n";
+    $message .= "Best regards,\n" . get_bloginfo('name');
+
+    return wp_mail($email, $subject, $message);
 }
 
-/**
- * Function to verify magic login token
- */
-function verify_magic_login_token($email, $token)
-{
-    $user = get_user_by('email', $email);
-    if ($user) {
-        $stored_token = get_user_meta($user->ID, 'magic_login_token', true);
-        return ($stored_token === $token);
-    }
-    return false;
-}
-
-/**
- * Function to redirect user to home
- */
-function magic_link_expire_redirect()
-{
-    echo '<script>setTimeout(function() {window.location.href = "' . home_url('/') . '";}, 5000);</script>';
-}
-
-/**
- * Function to handle magic login
- */
-function handle_magic_login()
-{
-    if (isset($_GET['user_mail']) && isset($_GET['token'])) {
-        $email = sanitize_email($_GET['user_mail']);
+// Function to handle magic login
+function handle_magic_login() {
+    if (isset($_GET['action']) && $_GET['action'] === 'magic_login' && isset($_GET['email']) && isset($_GET['token'])) {
+        $email = sanitize_email($_GET['email']);
         $token = sanitize_text_field($_GET['token']);
 
-        // Check if token and email match
-        if (verify_magic_login_token($email, $token)) {
-            // Check if token is still valid (within 15 minutes)
-            $token_time = get_magic_login_token_time($email);
-            $expiration_time = 15 * MINUTE_IN_SECONDS;
-            if ($token_time && (time() - $token_time <= $expiration_time)) {
-                // Token is valid, log in the user
-                $user = get_user_by('email', $email);
-                if ($user) {
-                    wp_set_current_user($user->ID, $user->user_login);
-                    wp_set_auth_cookie($user->ID);
-                    do_action('wp_login', $user->user_login, $user);
-                    // Redirect user to home page or any desired page after login
-                    wp_redirect(home_url('/page')); // Replace 'page' with your desired page slug
-                    exit;
-                }
-            } else {
-                // Token has expired
-                $user = get_user_by('email', $email);
-                if ($user) {
-                    delete_user_meta($user->ID, 'magic_login_token');
-                    delete_user_meta($user->ID, 'magic_login_token_time');
-                }
-                magic_link_expire_redirect();
-                wp_die('Magic login link has expired. You will be redirected to the home page in 5 seconds.');
-            }
-        } else {
-            // Token or email is invalid
-            magic_link_expire_redirect();
-            wp_die('Invalid magic login link. You will be redirected to the home page in 5 seconds.');
+        $user = get_user_by('email', $email);
+
+        if (!$user) {
+            wp_die('Invalid user');
         }
+
+        $stored_token = get_user_meta($user->ID, 'magic_login_token', true);
+        $expiration = get_user_meta($user->ID, 'magic_login_token_expiration', true);
+
+        if ($token !== $stored_token || time() > $expiration) {
+            wp_die('Invalid or expired login link');
+        }
+
+        // Login successful
+        wp_set_current_user($user->ID);
+        wp_set_auth_cookie($user->ID);
+        do_action('wp_login', $user->user_login, $user);
+
+        // Clean up
+        delete_user_meta($user->ID, 'magic_login_token');
+        delete_user_meta($user->ID, 'magic_login_token_expiration');
+
+        wp_safe_redirect(home_url());
+        exit;
     }
 }
 add_action('init', 'handle_magic_login');
 
-/**
- * Function to send magic login link via email
- */
-function send_magic_login_link($email, $token)
-{
-    $user = get_user_by('email', $email);
-    $first_name = '';
-    $last_name = '';
-    if ($user) {
-        $first_name = $user->first_name;
-        $last_name = $user->last_name;
-    }
-
-    $login_link = home_url("?user_mail=$email&token=$token");
-    $message = "Hello $first_name $last_name,\n\n";
-    $message .= "Click on the following link to login into xyz website: $login_link\n";
-    $message .= "This link will expire in 15 minutes and can only be used once.\n\n";
-    $message .= "Best regards,\n xyz company";
-
-    // Send the email
-    wp_mail($email, 'xyz Website Login Link', $message);
-}
-
-/**
- * Shortcode for magic login form
- */
-function magic_login_form_shortcode()
-{
+// Shortcode to display magic login form
+function magic_login_form_shortcode() {
     ob_start();
-?>
-    <form id="custom-profile-form" method="post" action="" class="LoginLink">
-        <div class="LoginLinkFields">
-            <fieldset>
-                <input type="email" name="user_email" id="user_email" placeholder="<?php _e('Enter Your Email', '[TEXT_DOMAIN]'); ?>" required>
-            </fieldset>
-        </div>
-        <div>
-            <input type="submit" name="login_link" class="LoginLinkBtn" value="<?php _e('Send Login Link', '[TEXT_DOMAIN]'); ?>"> <!-- Replace '[TEXT_DOMAIN]' with your text domain -->
-        </div>
+    ?>
+    <form id="magic-login-form">
+        <?php wp_nonce_field('magic-login-nonce', 'security'); ?>
+        <input type="email" id="member" name="member" required placeholder="Enter your email">
+        <button type="submit">Send Magic Login Link</button>
     </form>
     <div id="login-message"></div>
-<?php
+    <script>
+    jQuery(document).ready(function($) {
+        $('#magic-login-form').on('submit', function(e) {
+            e.preventDefault();
+
+            var member = $("#member").val().trim();
+            var emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+            if (member === "" || !emailRegex.test(member)) {
+                $("#login-message").addClass("LoginMessageError");
+                $("#login-message").html("<p>Please enter a valid email address.</p>").css({ color: "red", "padding-bottom": "20px" });
+                return;
+            }
+
+            var data = {
+                action: "magic_login_form",
+                member_mail: member,
+                security: $("input[name=security]").val()
+            };
+
+            $.ajax({
+                url: '<?php echo admin_url('admin-ajax.php'); ?>',
+                type: "POST",
+                data: data,
+                success: function(response) {
+                    if (response.success) {
+                        $('#login-message').text(response.data).css('color', 'green');
+                    } else {
+                        $('#login-message').text(response.data).css('color', 'red');
+                    }
+                }
+            });
+        });
+    });
+    </script>
+    <?php
     return ob_get_clean();
 }
-add_shortcode('magic_login_form', 'magic_login_form_shortcode');
+add_shortcode('magic_login', 'magic_login_form_shortcode');
+?>
